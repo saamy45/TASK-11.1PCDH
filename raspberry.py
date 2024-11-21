@@ -1,59 +1,102 @@
-import os
-import requests
-from paho.mqtt import client as mqtt_client
+import paho.mqtt.client as mqtt
+import RPi.GPIO as GPIO
+import tkinter as tk
+import threading
 
-# Configuration
-MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 1883
-MQTT_TOPIC = "Home/SensorData"
+# MQTT broker and topic details
+broker = "broker.hivemq.com"
+topic = "Home/SensorData"
 
-FIREBASE_SECRET = os.getenv("FIREBASE_SECRET")
-FIREBASE_URL = "https://embedded-1system-default-rtdb.firebaseio.com"
+# GPIO setup
+alert_pin = 17  # Change this to the GPIO pin you want to use
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(alert_pin, GPIO.OUT)
+GPIO.output(alert_pin, GPIO.LOW)  # Set pin to LOW initially
 
-# Validate Firebase secret
-if not FIREBASE_SECRET:
-    raise EnvironmentError("FIREBASE_SECRET is not set. Please set the environment variable and try again.")
+# Temperature threshold
+TEMP_THRESHOLD = 30.0  # Adjust this to your desired threshold
 
-# Function to send sensor data to Firebase
-def send_data_to_firebase(data):
-    formatted_data = {"SensorData": data}
-    firebase_endpoint = f"{FIREBASE_URL}/SensorData.json?auth={FIREBASE_SECRET}"
+# GUI setup
+root = tk.Tk()
+root.title("Temperature and Smoke Alert")
+root.geometry("400x300")  # Set a bigger window size
+
+# Create labels to display sensor values
+temperature_label = tk.Label(root, text="Temperature: -- °C", font=("Helvetica", 16))
+temperature_label.pack()
+
+humidity_label = tk.Label(root, text="Humidity: -- %", font=("Helvetica", 16))
+humidity_label.pack()
+
+smoke_level_label = tk.Label(root, text="Smoke Level: -- %", font=("Helvetica", 16))
+smoke_level_label.pack()
+
+# Add a label for alert status
+alert_label = tk.Label(root, text="Alert: --", font=("Helvetica", 16))
+alert_label.pack()
+
+def on_message(client, userdata, msg):
+    data = msg.payload.decode()
+    print(f"Received sensor data: {data}")  # Print the raw data for debugging
+
     try:
-        response = requests.patch(firebase_endpoint, json=formatted_data)
-        if response.ok:
-            print(f"Successfully updated Firebase with data: {data}")
+        # Look for key-value pairs in the data, e.g., "Temperature: 25.5, Humidity: 60, SmokeLevel: 10"
+        # Ensure the string is split correctly
+        parts = data.split(',')
+        
+        # Extract each value (Temperature, Humidity, SmokeLevel)
+        temperature_str = next((item for item in parts if "Temperature" in item), "").split(":")[1].strip()
+        humidity_str = next((item for item in parts if "Humidity" in item), "").split(":")[1].strip()
+        smoke_level_str = next((item for item in parts if "SmokeLevel" in item), "").split(":")[1].strip()
+        
+        # Convert them to float
+        temperature = float(temperature_str)
+        humidity = float(humidity_str)
+        smoke_level = float(smoke_level_str)
+
+        print(f"Extracted Temperature: {temperature} °C")
+        print(f"Extracted Humidity: {humidity} %")
+        print(f"Extracted Smoke Level: {smoke_level} %")
+        
+        # Update GUI with received values
+        temperature_label.config(text=f"Temperature: {temperature} °C")
+        humidity_label.config(text=f"Humidity: {humidity} %")
+        smoke_level_label.config(text=f"Smoke Level: {smoke_level} %")
+        
+        # Check if temperature exceeds the threshold and update the GPIO pin
+        if temperature > TEMP_THRESHOLD:
+            GPIO.output(alert_pin, GPIO.HIGH)
+            alert_label.config(text="Alert: Temperature threshold exceeded!", fg="red")
+            print("Temperature threshold exceeded! GPIO pin set to HIGH.")
         else:
-            print(f"Failed to update Firebase. Error: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"An error occurred while updating Firebase: {e}")
+            GPIO.output(alert_pin, GPIO.LOW)
+            alert_label.config(text="Alert: Temperature is normal.", fg="green")
+            print("Temperature below threshold. GPIO pin set to LOW.")
+            
+    except (ValueError, IndexError) as e:
+        print(f"Error parsing sensor data: {e}")
+        alert_label.config(text="Error parsing data!", fg="orange")
 
-# MQTT Callbacks
-def handle_connect(client, userdata, flags, rc):
-    if rc == 0:
-        print("Connected to MQTT broker successfully!")
-        client.subscribe(MQTT_TOPIC)
-    else:
-        print(f"Connection failed with return code {rc}")
+# Initialize MQTT client
+client = mqtt.Client()
+client.connect(broker, 1883)
 
-def handle_message(client, userdata, message):
-    try:
-        payload = message.payload.decode("utf-8")
-        print(f"Message received from topic {message.topic}: {payload}")
-        send_data_to_firebase(payload)
-    except Exception as e:
-        print(f"Error processing MQTT message: {e}")
+# Assign callback function
+client.on_message = on_message
 
-# Initialize and run the MQTT client
-def run_mqtt_client():
-    mqtt_client_instance = mqtt_client.Client()
-    mqtt_client_instance.on_connect = handle_connect
-    mqtt_client_instance.on_message = handle_message
+# Subscribe to the topic
+client.subscribe(topic)
 
-    try:
-        mqtt_client_instance.connect(MQTT_BROKER, MQTT_PORT)
-        mqtt_client_instance.loop_forever()
-    except Exception as e:
-        print(f"Failed to connect to MQTT broker: {e}")
+# Start listening for incoming messages
+print("Listening for sensor data...")
 
-if __name__ == "__main__":
-    run_mqtt_client()
+# Run MQTT client loop in a separate thread to avoid blocking the main thread
+def run_mqtt():
+    client.loop_forever()
+
+mqtt_thread = threading.Thread(target=run_mqtt)
+mqtt_thread.daemon = True
+mqtt_thread.start()
+
+# Run the GUI
+root.mainloop()
